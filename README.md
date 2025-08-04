@@ -28,6 +28,6 @@ The script extracts the most specific date possible from photo descriptions. Thi
 
 The most specific match is used:
 1. Full dates: Detects dates like DD-MM-YYYY, DD-MM-YY, or DD-MM-YY (with -, . or / separator) and returns YYYY-MM-DD.
-2. Month-year: Detects months like MM-YYYY (with -, . or / separator) and returns YYYY-MM.
-3. Seasons (in French): Detects seasons like printemps, été/ete, automne, and hiver followed by a year and returns YYYY-03 for spring, etc.
-4. Year: Detects years like YYYY and returns YYYY.
+2. Month-year: Detects months like MM-YYYY (with -, . or / separator) and returns YYYY-MM-XX.
+3. Seasons (in French): Detects seasons like printemps, été/ete, automne, and hiver followed by a year and returns YYYY-03-XX for spring, etc.
+4. Year: Detects years like YYYY and returns YYYY-XX-XX.
