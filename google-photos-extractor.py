@@ -1,9 +1,13 @@
 import json
+import logging
 import re
+import shutil
+import unicodedata
 import zipfile
 from pathlib import Path
 from pathvalidate import sanitize_filename
 
+logging.basicConfig(level=logging.INFO)
 zip_path = next(Path().glob('takeout-*.zip'))
 target_directory = Path('target')
 
@@ -29,6 +33,7 @@ REGEXP_EXACT_YEAR = re.compile(r'\s*\b((?:19|20)\d{2})\b\s*')
 
 def sanitize_description(description: str) -> str:
     description = description.strip()
+    description = unicodedata.normalize('NFC', description)
     description = description.replace('oeu', 'œu')
     description = re.sub(r' -([^ ])', ' - \\1', description)
     description = re.sub(r'([^ ])- ', '\\1 - ', description)
@@ -47,12 +52,13 @@ def format_date(year: str = None, month: str = None, day: str = None) -> str:
     day = f'{int(day):02d}' if day else 'XX'
     return f'{year}-{month}-{day}'
 
-def get_description_without_date(description: str, regular_expression: str) -> str:
+def get_description_without_date(description: str, regular_expression: re.Pattern) -> str:
     description = re.sub(regular_expression, '', description)
-    description = description[:1].upper() + description[1:]
+    if description:
+        description = description[:1].upper() + description[1:]
     return description
 
-def extract_sort_date_and_description(description: str) -> str:
+def extract_sort_date_and_description(description: str) -> tuple[str, str]:
 
     # Exact date
     match = REGEXP_EXACT_DATE.search(description)
@@ -75,6 +81,8 @@ def extract_sort_date_and_description(description: str) -> str:
     match = REGEXP_EXACT_SEASON.search(description)
     if match:
         season, year = match.groups()
+        season = season.lower()
+        season = season.replace('é', 'e')
         return format_date(year, SEASONS.get(season)), get_description_without_date(description, REGEXP_EXACT_SEASON)
 
     # Exact year
@@ -83,12 +91,12 @@ def extract_sort_date_and_description(description: str) -> str:
         year = match.group(1)
         return format_date(year), get_description_without_date(description, REGEXP_EXACT_YEAR)
 
-    return format_date(), description
+    return format_date(), get_description_without_date(description, r'')
 
 with zipfile.ZipFile(zip_path, 'r') as zf:
     target_files = zf.namelist()
 
-    print('[*] Reading JSON files')
+    logging.info('[*] Reading JSON files')
 
     sort_dates_and_descriptions = {}
     for file in target_files:
@@ -105,56 +113,59 @@ with zipfile.ZipFile(zip_path, 'r') as zf:
                         sort_date, description = extract_sort_date_and_description(description)
                         sanitized_description = sanitize_description(description)
                         if description.rstrip() != sanitized_description:
-                            print(f'[*] Sanitized description:\n      {description}\n      {sanitized_description}')
+                            logging.info(f'[*] Sanitized description:\n      {description}\n      {sanitized_description}')
                         if re.search(r'/original_[^/]+_$', base_path):
-                            print(f'[*] Dirty fix for original_guid_.json: {base_path}')
+                            logging.info(f'[*] Dirty fix for original_guid_.json: {base_path}')
                             base_path += 'P.jpg'
                         sort_dates_and_descriptions[base_path] = sort_date, sanitized_description
                 except json.JSONDecodeError:
-                    print(f'[-] Ignored invalid JSON: {file}')
+                    logging.error(f'[-] Ignored invalid JSON: {file}')
 
-    print('[*] Handling modified image files')
+    logging.info('[*] Handling modified image files')
 
     files_to_remove = set()
     for file in target_files:
+        # Handling duplicates in the form Name-modifié.jpg or Name(1).jpg
         match = re.search(r'^(.+)(?:-modifié|\(1\))(\.[^.]+)$', file)
         if match:
             original_file = match.group(1) + match.group(2)
+            files_to_remove.add(original_file)
             if file not in sort_dates_and_descriptions and original_file in sort_dates_and_descriptions:
                 sort_dates_and_descriptions[file] = sort_dates_and_descriptions.pop(original_file)
-                files_to_remove.add(original_file)
-                print(f'[*] Removed original image:\n      {original_file}\n      {file}')
+                logging.info(f'[*] Removed original image: {original_file}')
+            else:
+                logging.warning(f'[-] Removed original image without description: {original_file}')
 
-    print('[*] Extracting image files')
+    logging.info('[*] Extracting image files')
 
     for file in target_files:
-        if not file.endswith('.json') and not file.endswith('/') and file not in files_to_remove:
+        if not file.endswith('.json') and not file.endswith('.MP') and not file.endswith('.MP~2') and not file.endswith('/') and file not in files_to_remove:
             file_path = Path(file)
 
             sort_date, description = sort_dates_and_descriptions.pop(file_path.as_posix(), (None, None))
             if sort_date and description:
                 target_file_name = f'{sort_date}___{description}___{file_path.stem}{file_path.suffix}'
             else:
-                print(f'[-] Missing data for: {file_path}')
+                logging.warning(f'[-] Missing data for: {file_path}')
                 target_file_name = f'XXXX-XX-XX___-___{file_path.stem}{file_path.suffix}'
 
             directory = str(file_path.parent)
             sanitized_directory = sanitize_directory(directory)
             if directory != sanitized_directory:
-                print(f'[-] Sanitized directory:\n      {directory}\n      {sanitized_directory}')
+                logging.warning(f'[-] Sanitized directory: {directory}')
 
             current_target_directory = target_directory / sanitized_directory
             current_target_directory.mkdir(parents=True, exist_ok=True)
             target_path = current_target_directory / target_file_name
 
-            #print(f'[*] Extracting image: {target_path}')
+            logging.debug(f'[*] Extracting image: {target_path}')
 
-            if len(str(target_path)) > 256:
-                print(f'[-] Path exceeds length limit: {target_path}')
+            if len(target_file_name.encode('utf-8')) > 255:
+                logging.error(f'[-] Path exceeds length limit: {target_path}')
 
             with zf.open(file) as source, open(target_path, 'wb') as target:
-                target.write(source.read())
-                #print(f'[+] Extracted image: {file_path.name}')
+                shutil.copyfileobj(source, target)
+                logging.debug(f'[+] Extracted image: {file_path.name}')
 
     for base_path in sort_dates_and_descriptions.keys():
-        print(f'[-] Unused description for: {base_path}')
+        logging.warning(f'[-] Unused description for: {base_path}')
